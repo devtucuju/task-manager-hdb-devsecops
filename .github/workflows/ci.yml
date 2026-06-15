@@ -53,6 +53,8 @@ jobs:
 
       - name: Run pytest
         env:
+          FLASK_ENV: testing
+          SECRET_KEY: ci-secret-key-not-for-production
           SYSLOG_ENABLED: "false"
           BOOTSTRAP_ADMIN_ENABLED: "false"
         run: pytest test_app.py -v
