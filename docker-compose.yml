@@ -1,0 +1,101 @@
+# =============================================================================
+# Docker Compose — Task Manager Flask (DevSecOps)
+# Repositório: https://github.com/devtucuju/task-manager-hdb-devsecops
+#
+# Uso:
+#   docker compose up -d --build
+#   docker compose down
+#   docker compose logs -f app
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Aplicação Flask (Gunicorn)
+  # ---------------------------------------------------------------------------
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: task-manager-app
+    ports:
+      - "5000:5000"
+    environment:
+      FLASK_APP: todo_project
+      FLASK_ENV: production
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      # URI do PostgreSQL (requer psycopg2 e leitura via env na app)
+      SQLALCHEMY_DATABASE_URI: postgresql://${POSTGRES_USER:-taskmanager}:${POSTGRES_PASSWORD:-taskmanager_secret}@db:5432/${POSTGRES_DB:-taskmanager_db}
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
+    volumes:
+      # Bind mount para hot-reload / desenvolvimento local
+      - ./:/app
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - app-network
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "1"
+    working_dir: /app/todo_project
+
+  # ---------------------------------------------------------------------------
+  # Banco de dados PostgreSQL
+  # ---------------------------------------------------------------------------
+  db:
+    image: postgres:15-alpine
+    container_name: task-manager-db
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-taskmanager}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-taskmanager_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-taskmanager_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-taskmanager} -d ${POSTGRES_DB:-taskmanager_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # ---------------------------------------------------------------------------
+  # Coletor de logs (rsyslog)
+  # ---------------------------------------------------------------------------
+  syslog:
+    image: rsyslog:latest
+    container_name: task-manager-syslog
+    ports:
+      - "514:514/udp"
+    volumes:
+      # Logs persistidos no host (diretório ./logs na raiz do projeto)
+      - ./logs:/var/log
+    restart: unless-stopped
+    networks:
+      - app-network
+
+# =============================================================================
+# Redes
+# =============================================================================
+networks:
+  app-network:
+    driver: bridge
+    name: app-network
+
+# =============================================================================
+# Volumes nomeados (persistência)
+# =============================================================================
+volumes:
+  postgres_data:
+    name: postgres_data
+  logs:
+    name: logs
