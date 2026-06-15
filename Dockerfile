@@ -25,11 +25,9 @@ WORKDIR /app
 # 5. Copiar apenas requirements.txt primeiro (aproveita cache de camadas do Docker)
 COPY requirements.txt .
 
-# 6. Instalar dependências Python + Gunicorn (servidor WSGI para produção)
-#    run.py usa app.run(debug=True), inadequado para produção; Gunicorn evita debug
+# 6. Instalar dependências Python (inclui gunicorn para produção)
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir gunicorn
+    && pip install --no-cache-dir -r requirements.txt
 
 # 7. Copiar o restante do código-fonte
 COPY . .

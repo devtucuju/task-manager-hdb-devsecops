@@ -1,0 +1,110 @@
+# =============================================================================
+# Docker Compose — Stack completo Task Manager DevSecOps
+# =============================================================================
+# Serviços: app, db, syslog + monitoramento (include)
+#
+# Uso:
+#   cp .env.example .env
+#   docker compose up -d --build
+#
+# Apenas monitoramento:
+#   ./scripts/deploy-monitoring.sh
+#   # ou: docker compose -f docker-compose.monitoring.yml up -d
+# =============================================================================
+
+include:
+  - path: docker-compose.monitoring.yml
+
+services:
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: task-manager-app
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "5000:5000"
+    environment:
+      FLASK_APP: todo_project
+      FLASK_ENV: ${FLASK_ENV:-production}
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+    volumes:
+      - ./:/app
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/about', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+    networks:
+      - app-network
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "1"
+    working_dir: /app/todo_project
+
+  db:
+    image: postgres:15-alpine
+    container_name: task-manager-db
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${DB_USER:-taskmanager}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-senha123}
+      POSTGRES_DB: ${DB_NAME:-taskmanager}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-taskmanager} -d ${DB_NAME:-taskmanager}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  syslog:
+    image: rsyslog/rsyslog:latest
+    container_name: task-manager-syslog
+    ports:
+      - "514:514/udp"
+    volumes:
+      - ./config/rsyslog/remote.conf:/etc/rsyslog.d/remote.conf:ro
+      - ./logs:/var/log
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+    networks:
+      - app-network
+
+volumes:
+  postgres_data:
+    name: postgres_data
+  logs:
+    name: logs

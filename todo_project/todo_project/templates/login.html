@@ -1,37 +1,30 @@
 {% extends "layout.html" %}
 
 {% block content %}
-
 <div class="content-section">
     <form method="POST" action="">
         {{ form.hidden_tag() }}
         <fieldset class="form-group">
             <legend class="border-bottom mb-4">{{ title }}</legend>
 
-            <!-- Username Field -->
             <div class="form-group">
-                {{ form.username.label(class="form-control-label") }}
-                {% if form.username.errors %}
-                {{ form.username(class="form-control is-invalid") }}
+                {{ form.email.label(class="form-control-label") }}
+                {% if form.email.errors %}
+                {{ form.email(class="form-control is-invalid") }}
                 <div class="invalid-feedback">
-                    {% for error in form.username.errors %}
-                    <span>{{ error }}</span>
-                    {% endfor %}
+                    {% for error in form.email.errors %}<span>{{ error }}</span>{% endfor %}
                 </div>
                 {% else %}
-                {{ form.username(class="form-control") }}
+                {{ form.email(class="form-control", type="email") }}
                 {% endif %}
             </div>
 
-            <!-- Password Field -->
             <div class="form-group">
                 {{ form.password.label(class="form-control-label") }}
                 {% if form.password.errors %}
                 {{ form.password(class="form-control is-invalid") }}
                 <div class="invalid-feedback">
-                    {% for error in form.password.errors %}
-                    <span>{{ error }}</span>
-                    {% endfor %}
+                    {% for error in form.password.errors %}<span>{{ error }}</span>{% endfor %}
                 </div>
                 {% else %}
                 {{ form.password(class="form-control") }}
@@ -41,17 +34,15 @@
             <div class="form-group">
                 {{ form.submit(class="btn btn-primary") }}
             </div>
-
         </fieldset>
     </form>
 
+    {% if config.REGISTRATION_ENABLED %}
     <div class="border-top pt-3 mb-3">
         <small class="text-muted">
-            Need An Account? <a class="ml-2" href="{{ url_for('register') }}">Sign Up Now</a>
+            Need an account? <a class="ml-2" href="{{ url_for('register') }}">Sign Up</a>
         </small>
     </div>
+    {% endif %}
 </div>
-
-
-
 {% endblock %}
