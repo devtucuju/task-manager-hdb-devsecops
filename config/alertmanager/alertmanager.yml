@@ -1,0 +1,37 @@
+# =============================================================================
+# Alertmanager — roteamento de alertas de segurança
+# =============================================================================
+# UI: http://localhost:9093
+# Configure SLACK_WEBHOOK_URL no .env para notificações Slack (opcional).
+# =============================================================================
+
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: default
+  group_by: ['alertname', 'severity', 'category']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers:
+        - severity = critical
+      receiver: default
+      repeat_interval: 1h
+
+receivers:
+  - name: default
+    # Descomente para Slack (defina SLACK_WEBHOOK_URL no ambiente do Alertmanager):
+    # slack_configs:
+    #   - api_url: '${SLACK_WEBHOOK_URL}'
+    #     channel: '#security-alerts'
+    #     title: '{{ .GroupLabels.alertname }}'
+    #     text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+
+inhibit_rules:
+  - source_matchers:
+      - alertname = MissingMetricsTarget
+    target_matchers:
+      - category = security
+    equal: []
