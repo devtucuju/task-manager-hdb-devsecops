@@ -10,6 +10,7 @@ from todo_project.bootstrap import bootstrap_admin
 from todo_project.config import Config
 from todo_project.extensions import bcrypt, csrf, db, limiter
 from todo_project.logging_config import setup_logging
+from todo_project.metrics import init_metrics
 
 
 def create_app(config_class=Config) -> Flask:
@@ -27,6 +28,7 @@ def create_app(config_class=Config) -> Flask:
     CORS(app, resources={r'/api/*': {'origins': app.config.get('CORS_ORIGINS', '*')}})
 
     setup_logging(app)
+    init_metrics(app)
 
     # Jinja2 auto-escape (XSS) — habilitado por padrão; reforço explícito
     app.jinja_env.autoescape = True

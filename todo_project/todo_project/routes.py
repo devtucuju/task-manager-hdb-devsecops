@@ -24,6 +24,7 @@ from todo_project.auth import (
     validate_password_strength,
 )
 from todo_project.extensions import csrf, db, limiter
+from todo_project.metrics import record_auth_failure
 from todo_project.forms import (
     LoginForm,
     RegistrationForm,
@@ -147,6 +148,7 @@ def register_routes(app):
                 next_page = request.args.get('next') or url_for('all_tasks')
                 return _set_jwt_cookie(make_response(redirect(next_page)), token)
 
+            record_auth_failure('invalid_credentials')
             flash('Invalid email or password.', 'danger')
 
         return render_template('login.html', title='Login', form=form)
@@ -451,6 +453,7 @@ def register_routes(app):
         log_login_attempt(email, success, user.id if user and success else None)
 
         if not success:
+            record_auth_failure('invalid_credentials')
             return jsonify({'error': 'Credenciais inválidas.'}), 401
 
         token = create_access_token(user)
@@ -480,6 +483,7 @@ def register_routes(app):
             return jsonify({'error': 'old_password e new_password são obrigatórios.'}), 400
 
         if not check_password(g.current_user.password_hash, old_password):
+            record_auth_failure('invalid_password')
             return jsonify({'error': 'Senha atual incorreta.'}), 401
 
         valid, message = validate_password_strength(new_password)
