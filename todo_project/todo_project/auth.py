@@ -7,6 +7,7 @@ import jwt
 from flask import current_app, g, jsonify, redirect, request, url_for, flash
 
 from todo_project.extensions import bcrypt, db
+from todo_project.metrics import record_auth_failure
 from todo_project.models import User
 
 # Mínimo 8 chars, maiúscula, minúscula, dígito e caractere especial
@@ -88,7 +89,12 @@ def token_required(f):
     def decorated(*args, **kwargs):
         user = load_current_user()
         if not user:
-            if request.path.startswith('/api/') or request.is_json:
+            if (
+                request.path.startswith('/api/')
+                or request.path.startswith('/tasks')
+                or request.is_json
+            ):
+                record_auth_failure('missing_or_invalid_token')
                 return jsonify({'error': 'Autenticação necessária'}), 401
             flash('Faça login para continuar.', 'warning')
             return redirect(url_for('login', next=request.path))

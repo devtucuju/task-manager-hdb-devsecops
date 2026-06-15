@@ -1,0 +1,122 @@
+# =============================================================================
+# DAST — Dynamic Application Security Testing
+# =============================================================================
+# Varredura dinâmica com OWASP ZAP (imagem oficial ghcr.io/zaproxy/zaproxy).
+# owasp/zap2docker-stable foi descontinuado — ver:
+# https://www.zaproxy.org/docs/docker/about/
+# =============================================================================
+
+name: DAST - Dynamic Application Security Testing
+
+on:
+  push:
+    branches: [main, master, develop, homolog]
+  pull_request:
+    branches: [main, master, develop, homolog]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dast-scan:
+    name: OWASP ZAP Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      # a) Checkout do código-fonte
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      # b) Configura Docker Buildx
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # c) Prepara .env mínimo para subir a stack em CI
+      - name: Criar .env para DAST
+        run: |
+          cp .env.example .env
+          sed -i 's/^SECRET_KEY=.*/SECRET_KEY=dast-ci-secret-key-not-for-production/' .env
+          sed -i 's/^FLASK_ENV=.*/FLASK_ENV=production/' .env
+          sed -i 's/^SYSLOG_ENABLED=.*/SYSLOG_ENABLED=false/' .env
+          sed -i 's/^BOOTSTRAP_ADMIN_ENABLED=.*/BOOTSTRAP_ADMIN_ENABLED=false/' .env
+
+      # d) Sobe PostgreSQL, app Flask e demais serviços
+      - name: Iniciar stack com docker-compose
+        run: docker compose up -d --build
+
+      # e) Aguarda aplicação responder na rota /about
+      - name: Aguardar aplicação estar pronta
+        run: |
+          echo "Aguardando health check..."
+          for attempt in $(seq 1 60); do
+            if curl -sf http://localhost:5000/about > /dev/null; then
+              echo "Aplicação pronta na tentativa ${attempt}."
+              exit 0
+            fi
+            echo "Tentativa ${attempt}/60 — aguardando 5s..."
+            sleep 5
+          done
+          echo "Timeout: aplicação não ficou pronta."
+          docker compose ps
+          docker compose logs app --tail 80
+          exit 1
+
+      # f) Executa OWASP ZAP baseline (imagem GHCR oficial)
+      #    A action publica report_json.json e report_md.md por padrão
+      - name: Executar OWASP ZAP baseline
+        uses: zaproxy/action-baseline@v0.15.0
+        with:
+          target: http://localhost:5000
+          docker_name: ghcr.io/zaproxy/zaproxy:stable
+          allow_issue_writing: false
+          fail_action: false
+          cmd_options: -a
+          artifact_name: zap-reports
+
+      # g) Exibir resumo do relatório JSON
+      - name: Exibir relatório
+        if: always()
+        run: |
+          if [ ! -f report_json.json ]; then
+            echo "report_json.json não encontrado — verifique logs do ZAP acima."
+            exit 1
+          fi
+          sudo apt-get update -qq && sudo apt-get install -y -qq jq > /dev/null
+          echo "=== Resumo OWASP ZAP ==="
+          jq -r '
+            [.site[]?.alerts[]?]
+            | group_by(.riskdesc)
+            | map({risk: .[0].riskdesc, count: length})
+            | .[]
+            | "\(.risk): \(.count) alerta(s)"
+          ' report_json.json || true
+          echo ""
+          echo "=== Alertas High / Critical ==="
+          jq -r '
+            [.site[]?.alerts[]?
+             | select(.riskcode == "3" or .riskcode == "4")]
+            | .[]
+            | "[\(.riskdesc)] \(.name)"
+          ' report_json.json || echo "Nenhum alerta High/Critical."
+
+      # h) Falha apenas em vulnerabilidades High ou Critical (riskcode 3 ou 4)
+      - name: Falhar se vulnerabilidades críticas
+        if: always()
+        run: |
+          if [ ! -f report_json.json ]; then
+            echo "::error::Relatório ZAP ausente."
+            exit 1
+          fi
+          sudo apt-get update -qq && sudo apt-get install -y -qq jq > /dev/null
+          HIGH_COUNT=$(jq '[.site[]?.alerts[]? | select(.riskcode == "3" or .riskcode == "4")] | length' report_json.json)
+          if [ "${HIGH_COUNT}" -gt 0 ]; then
+            echo "::error::Encontradas ${HIGH_COUNT} vulnerabilidade(s) High/Critical."
+            exit 1
+          fi
+          echo "Nenhuma vulnerabilidade High/Critical detectada."
+
+      # i) Encerra containers (sempre, mesmo em falha)
+      - name: Parar containers
+        if: always()
+        run: docker compose down -v --remove-orphans

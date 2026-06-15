@@ -1,0 +1,236 @@
+# =============================================================================
+# SAST — Static Application Security Testing
+# Bandit (código Python) + OWASP Dependency-Check + Safety (dependências pip)
+# =============================================================================
+name: SAST - Static Application Security Testing
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master, develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Caminho do código-fonte da aplicação Flask
+# (equivalente a app/ na especificação; neste repo o pacote é todo_project/todo_project)
+env:
+  APP_SOURCE: todo_project/todo_project
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Bandit — análise estática de segurança em código Python
+  # ---------------------------------------------------------------------------
+  bandit:
+    name: bandit
+    runs-on: ubuntu-latest
+    steps:
+      # a) Checkout do código
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      # b) Setup Python 3.11
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # c) Instalar bandit
+      - name: Instalar bandit
+        run: pip install bandit
+
+      # d) Executar bandit (relatório JSON)
+      - name: Executar bandit
+        run: |
+          bandit -r "${{ env.APP_SOURCE }}" -f json -o bandit-report.json || true
+
+      # e) Exibir relatório
+      - name: Exibir relatório Bandit
+        if: always()
+        run: |
+          if [ -f bandit-report.json ]; then
+            python -m json.tool bandit-report.json || cat bandit-report.json
+          else
+            echo "bandit-report.json não encontrado."
+          fi
+
+      # f) Falhar se encontrar issues críticas (HIGH no Bandit)
+      - name: Falhar se issues críticas (Bandit HIGH)
+        run: |
+          python << 'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          report = Path("bandit-report.json")
+          if not report.exists():
+              print("Relatório Bandit ausente — falha por segurança.")
+              sys.exit(1)
+
+          data = json.loads(report.read_text())
+          critical = [
+              r for r in data.get("results", [])
+              if r.get("issue_severity") in ("HIGH", "CRITICAL")
+          ]
+          if critical:
+              print(f"Bandit: {len(critical)} issue(s) HIGH/CRITICAL encontrada(s):")
+              for item in critical:
+                  print(
+                      f"  [{item['issue_severity']}] {item['test_id']} "
+                      f"{item['filename']}:{item['line_number']} — {item['issue_text']}"
+                  )
+              sys.exit(1)
+          print("Bandit: nenhuma issue HIGH/CRITICAL.")
+          PY
+
+      - name: Upload artefato bandit-report.json
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report
+          path: bandit-report.json
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # 2. OWASP Dependency-Check — vulnerabilidades em dependências
+  # ---------------------------------------------------------------------------
+  dependency-check:
+    name: dependency-check
+    runs-on: ubuntu-latest
+    steps:
+      # a) Checkout do código
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      # b) Setup Java (requerido pelo OWASP Dependency-Check)
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # c) Instalar OWASP Dependency-Check
+      - name: Instalar OWASP Dependency-Check
+        run: |
+          DC_VERSION="10.0.4"
+          wget -q "https://github.com/jeremylong/DependencyCheck/releases/download/v${DC_VERSION}/dependency-check-${DC_VERSION}-release.zip"
+          unzip -q "dependency-check-${DC_VERSION}-release.zip"
+          echo "$PWD/dependency-check/bin" >> "$GITHUB_PATH"
+
+      # d) Executar análise (JSON)
+      - name: Executar Dependency-Check
+        run: |
+          mkdir -p dependency-check-reports
+          dependency-check.sh \
+            --project "Task Manager" \
+            --scan . \
+            --format JSON \
+            --out dependency-check-reports \
+            --noupdate \
+            --exclude "**/.git/**" \
+            --exclude "**/.venv/**" \
+            --exclude "**/venv/**" \
+            --exclude "**/node_modules/**" \
+            --exclude "**/__pycache__/**" \
+            || true
+          # Normaliza nome do artefato solicitado
+          if [ -f dependency-check-reports/dependency-check-report.json ]; then
+            cp dependency-check-reports/dependency-check-report.json dependency-check-report.json
+          else
+            echo '{"dependencies":[]}' > dependency-check-report.json
+          fi
+
+      # e) Exibir relatório
+      - name: Exibir relatório Dependency-Check
+        if: always()
+        run: |
+          if [ -f dependency-check-report.json ]; then
+            python -m json.tool dependency-check-report.json | head -200 || cat dependency-check-report.json
+          fi
+
+      # f) Falhar se encontrar vulnerabilidades críticas
+      - name: Falhar se vulnerabilidades críticas
+        run: |
+          python << 'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          report = Path("dependency-check-report.json")
+          data = json.loads(report.read_text())
+          critical = []
+
+          for dep in data.get("dependencies", []):
+              for vuln in dep.get("vulnerabilities", []) or []:
+                  severity = (vuln.get("severity") or "").upper()
+                  cvss = float((vuln.get("cvssv3") or {}).get("baseScore") or 0)
+                  if severity == "CRITICAL" or cvss >= 9.0:
+                      critical.append({
+                          "name": vuln.get("name"),
+                          "severity": severity,
+                          "cvss": cvss,
+                          "package": dep.get("fileName"),
+                      })
+
+          if critical:
+              print(f"Dependency-Check: {len(critical)} vulnerabilidade(s) CRITICAL:")
+              for item in critical:
+                  print(f"  {item['name']} ({item['severity']}, CVSS {item['cvss']}) em {item['package']}")
+              sys.exit(1)
+          print("Dependency-Check: nenhuma vulnerabilidade CRITICAL.")
+          PY
+
+      - name: Upload artefato dependency-check-report.json
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-check-report
+          path: dependency-check-report.json
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # 3. Safety — auditoria de pacotes Python (requirements.txt)
+  # ---------------------------------------------------------------------------
+  safety:
+    name: safety
+    runs-on: ubuntu-latest
+    steps:
+      # a) Checkout do código
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      # b) Setup Python 3.11
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # c) Instalar safety (v2.x — compatível com --json da especificação)
+      - name: Instalar safety
+        run: pip install "safety>=2.3,<3"
+
+      # d) Executar safety (relatório JSON)
+      - name: Executar safety
+        run: |
+          safety check -r requirements.txt --json > safety-report.json || true
+          if [ ! -s safety-report.json ]; then
+            echo '[]' > safety-report.json
+          fi
+
+      # e) Exibir relatório
+      - name: Exibir relatório Safety
+        if: always()
+        run: |
+          if [ -f safety-report.json ]; then
+            python -m json.tool safety-report.json || cat safety-report.json
+          fi
+
+      - name: Upload artefato safety-report.json
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: safety-report
+          path: safety-report.json
+          if-no-files-found: warn

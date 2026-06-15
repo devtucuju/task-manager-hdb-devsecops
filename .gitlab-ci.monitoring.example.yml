@@ -1,0 +1,36 @@
+# =============================================================================
+# GitLab CI — exemplo de deploy de monitoramento (referência)
+# =============================================================================
+# Este projeto usa GitHub Actions (.github/workflows/deploy.yml).
+# Use este arquivo como referência se migrar para GitLab CI.
+# =============================================================================
+
+stages:
+  - test
+  - security
+  - deploy
+
+variables:
+  COMPOSE_MONITORING: docker-compose.monitoring.yml
+
+# ... jobs de test e security ...
+
+deploy_monitoring:
+  stage: deploy
+  image: docker:24-cli
+  services:
+    - docker:24-dind
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+  script:
+    - docker network create app-network 2>/dev/null || true
+    - docker compose -f ${COMPOSE_MONITORING} up -d
+    - chmod +x scripts/deploy-monitoring.sh
+    - ./scripts/deploy-monitoring.sh
+    - echo "Monitoramento iniciado em http://localhost:3000"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  environment:
+    name: monitoring
+    url: http://localhost:3000

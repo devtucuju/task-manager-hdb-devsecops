@@ -1,0 +1,63 @@
+# =============================================================================
+# Regras de alerta — Segurança (Task Manager DevSecOps)
+# =============================================================================
+# Avaliadas pelo Prometheus a cada evaluation_interval (15s).
+# Visualizar: Prometheus → Alerts | Alertmanager → http://localhost:9093
+# =============================================================================
+
+groups:
+  - name: security_alerts
+    rules:
+      - alert: HighAuthFailureRate
+        expr: sum(rate(auth_failures_total[5m])) > 0.1
+        for: 1m
+        labels:
+          severity: warning
+          category: security
+        annotations:
+          summary: "Taxa alta de falhas de autenticação"
+          description: "Possível ataque de força bruta detectado ({{ $value | humanize }} falhas/s)."
+
+      - alert: UnusualResponseTime
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(flask_request_duration_seconds_bucket[5m])) by (le)
+          ) > 2
+        for: 5m
+        labels:
+          severity: warning
+          category: performance
+        annotations:
+          summary: "Tempo de resposta anormalmente alto"
+          description: "Latência p95 acima de 2s ({{ $value | humanizeDuration }}). Possível DoS ou gargalo."
+
+      - alert: HighErrorRate
+        expr: sum(rate(flask_requests_total{status=~"5.."}[5m])) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+          category: availability
+        annotations:
+          summary: "Taxa alta de erros 5xx"
+          description: "Aplicação pode estar instável ({{ $value | humanize }} erros/s)."
+
+      - alert: AuthFailureSpike
+        expr: sum(increase(auth_failures_total{reason="invalid_credentials"}[15m])) > 50
+        for: 0m
+        labels:
+          severity: critical
+          category: security
+        annotations:
+          summary: "Pico de credenciais inválidas"
+          description: "Mais de 50 tentativas de login falhas em 15 minutos."
+
+      - alert: MissingMetricsTarget
+        expr: up{job="task-manager"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          category: monitoring
+        annotations:
+          summary: "Task Manager fora do ar ou /metrics inacessível"
+          description: "Prometheus não consegue coletar métricas da aplicação."

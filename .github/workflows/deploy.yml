@@ -1,0 +1,871 @@
+# =============================================================================
+# Deploy Pipeline — deploy contínuo com staging, smoke tests e produção
+# =============================================================================
+# Task Manager DevSecOps
+#
+# Fluxo (push em main):
+#   1. validate-gates   → aguarda CI, SAST e DAST verdes no mesmo commit
+#   2. build-and-push   → build multi-plataforma (Buildx) + push Docker Hub
+#   3. deploy-staging   → deploy em homolog/staging
+#   4. smoke-tests      → health checks pós-deploy em staging
+#   5. rollback-staging → (automático) reverte staging se smoke falhar
+#   6. deploy-prod      → deploy em produção (aprovação manual obrigatória)
+#
+# Rollback manual:
+#   Actions → Deploy Pipeline → Run workflow
+#   → action: rollback-staging | rollback-production
+#   → image_tag: v1.2.0 (obrigatório)
+#
+# Secrets (Settings → Secrets and variables → Actions):
+#   DOCKER_USERNAME        — usuário Docker Hub
+#   DOCKER_PASSWORD        — token de acesso Docker Hub
+#   STAGING_SSH_HOST       — (opcional) host do servidor de staging
+#   STAGING_SSH_USER       — usuário SSH de staging
+#   STAGING_SSH_KEY        — chave privada SSH para staging
+#   PROD_SSH_HOST          — host do servidor de produção
+#   PROD_SSH_USER          — usuário SSH de produção
+#   PROD_SSH_KEY           — chave privada SSH para produção
+#   PROD_DATABASE_URL      — URI PostgreSQL de produção (deploy blue-green)
+#   PROD_JWT_SECRET        — SECRET_KEY Flask de produção
+#   SLACK_WEBHOOK_URL      — (opcional) Incoming Webhook do Slack
+#
+# Variables (Settings → Secrets and variables → Actions → Variables):
+#   STAGING_URL            — URL pública de staging (ex: https://homolog.exemplo.com)
+#   PROD_URL               — URL pública de produção
+#   STAGING_DEPLOY_PATH    — caminho no servidor staging (padrão: /opt/task-manager)
+#   PRODUCTION_DEPLOY_PATH — caminho no servidor produção (padrão: /opt/task-manager)
+#   DOCKER_PLATFORMS       — (opcional) plataformas Buildx (padrão: linux/amd64,linux/arm64)
+#
+# Environments (Settings → Environments):
+#   homolog / staging  — deploy automático em homologação
+#   production         — OBRIGATÓRIO: Required reviewers para aprovação manual
+# =============================================================================
+
+name: Deploy Pipeline
+
+on:
+  # Deploy contínuo exclusivamente em push na branch main
+  push:
+    branches:
+      - main
+
+  # Rollback manual e re-deploy sob demanda
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Ação a executar"
+        required: true
+        type: choice
+        options:
+          - deploy
+          - deploy-monitoring
+          - rollback-staging
+          - rollback-production
+      image_tag:
+        description: "Tag da imagem para rollback (ex: v1.2.0 ou 1.0.0-build.abc1234)"
+        required: false
+        type: string
+      rollback_reason:
+        description: "Motivo do rollback (auditoria)"
+        required: false
+        type: string
+      skip_staging:
+        description: "Pular staging (apenas emergência)"
+        type: boolean
+        default: false
+
+# Permissões mínimas necessárias para gates, deployments e auditoria
+permissions:
+  contents: read
+  actions: read          # ler status de workflows CI/SAST/DAST
+  deployments: write     # registrar deployments para auditoria
+  statuses: read         # ler check runs do commit
+
+# Variáveis globais do pipeline (não sensíveis)
+env:
+  IMAGE_NAME: task-manager
+  # Checks obrigatórios — nomes dos jobs em ci.yml, sast.yml e dast.yml
+  REQUIRED_CHECKS: >-
+    Test,
+    Lint,
+    bandit,
+    dependency-check,
+    OWASP ZAP Scan
+
+jobs:
+  # ===========================================================================
+  # Job 0: Validar gates de qualidade e segurança (CI + SAST + DAST)
+  # ===========================================================================
+  # Aguarda que os workflows paralelos (ci.yml, sast.yml, dast.yml) concluam
+  # com sucesso no MESMO commit antes de prosseguir com build/deploy.
+  # ===========================================================================
+  validate-gates:
+    name: Validar CI, SAST e DAST
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event.inputs.action == 'deploy'
+    outputs:
+      gates_passed: ${{ steps.gates.outputs.passed }}
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Aguardar e validar workflows de qualidade
+        id: gates
+        uses: actions/github-script@v7
+        env:
+          REQUIRED_CHECKS: ${{ env.REQUIRED_CHECKS }}
+        with:
+          script: |
+            const required = (process.env.REQUIRED_CHECKS || '')
+              .split(',')
+              .map((s) => s.trim())
+              .filter(Boolean);
+
+            const sha = context.sha;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const maxAttempts = 90;   // ~45 min (intervalo 30s)
+            const intervalMs = 30_000;
+
+            core.info(`Commit: ${sha}`);
+            core.info(`Checks obrigatórios: ${required.join(', ')}`);
+
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+              const { data: checkRuns } = await github.rest.checks.listForRef({
+                owner,
+                repo,
+                ref: sha,
+                per_page: 100,
+              });
+
+              const byName = new Map();
+              for (const run of checkRuns.check_runs) {
+                const existing = byName.get(run.name);
+                if (!existing || run.status === 'completed') {
+                  byName.set(run.name, run);
+                }
+              }
+
+              const missing = [];
+              const failed = [];
+              const pending = [];
+
+              for (const name of required) {
+                const run = byName.get(name);
+                if (!run) {
+                  missing.push(name);
+                  continue;
+                }
+                if (run.status !== 'completed') {
+                  pending.push(`${name} (${run.status})`);
+                  continue;
+                }
+                if (run.conclusion !== 'success') {
+                  failed.push(`${name} (${run.conclusion})`);
+                }
+              }
+
+              if (failed.length > 0) {
+                core.setFailed(
+                  `Gate DevSecOps reprovado. Checks com falha: ${failed.join(', ')}`
+                );
+                core.setOutput('passed', 'false');
+                return;
+              }
+
+              if (missing.length === 0 && pending.length === 0) {
+                core.info('Todos os gates passaram.');
+                core.setOutput('passed', 'true');
+                return;
+              }
+
+              core.info(
+                `Tentativa ${attempt}/${maxAttempts} — ` +
+                `pendentes: [${pending.join(', ')}] | ausentes: [${missing.join(', ')}]`
+              );
+              await new Promise((r) => setTimeout(r, intervalMs));
+            }
+
+            core.setFailed(
+              'Timeout aguardando CI/SAST/DAST. Verifique se os workflows dispararam no commit.'
+            );
+            core.setOutput('passed', 'false');
+
+      - name: Resumo dos gates
+        if: always()
+        run: |
+          echo "### Gate DevSecOps" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Commit:** \`${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Autor do push:** @${{ github.actor }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Resultado:** ${{ steps.gates.outputs.passed == 'true' && '✅ Aprovado' || '❌ Reprovado' }}" >> "$GITHUB_STEP_SUMMARY"
+
+  # ===========================================================================
+  # Job 1: Build multi-plataforma e push para Docker Hub
+  # ===========================================================================
+  build-and-push:
+    name: Build e Push Docker
+    runs-on: ubuntu-latest
+    needs: [validate-gates]
+    if: |
+      always() &&
+      needs.validate-gates.result == 'success' &&
+      (github.event_name == 'push' || github.event.inputs.action == 'deploy')
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      image: ${{ steps.meta.outputs.image }}
+      previous_version: ${{ steps.prev.outputs.previous_version }}
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # histórico completo para git describe / tags
+
+      - name: Obter versão (git tag)
+        id: version
+        run: |
+          # Tag exata no commit atual (ex: v1.3.0)
+          if TAG=$(git describe --tags --exact-match HEAD 2>/dev/null); then
+            VERSION="$TAG"
+          else
+            # Tag mais recente + sufixo do commit (ex: v1.2.0-build.a1b2c3d)
+            BASE_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
+            VERSION="${BASE_TAG}-build.${GITHUB_SHA::7}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Versão da imagem: ${VERSION}"
+
+      - name: Versão anterior (rollback manual)
+        id: prev
+        run: |
+          PREV=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "0.0.0")
+          echo "previous_version=${PREV}" >> "$GITHUB_OUTPUT"
+          echo "Versão anterior: ${PREV}"
+
+      - name: Metadados da imagem
+        id: meta
+        run: |
+          IMAGE="${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login no Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # Build multi-plataforma com cache GHA e push das tags latest + versão
+      - name: Build e push (multi-plataforma)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ vars.DOCKER_PLATFORMS || 'linux/amd64,linux/arm64' }}
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}:latest
+            ${{ steps.meta.outputs.image }}:${{ steps.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.repositoryUrl }}
+
+      - name: Resumo do build
+        run: |
+          echo "### Build Docker" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Imagem:** \`${{ steps.meta.outputs.image }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Tags:** \`latest\`, \`${{ steps.version.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Plataformas:** \`${{ vars.DOCKER_PLATFORMS || 'linux/amd64,linux/arm64' }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # ===========================================================================
+  # Job 2: Deploy em staging (homolog)
+  # ===========================================================================
+  # Modo A: SSH no servidor de staging (secrets STAGING_SSH_* configurados)
+  # Modo B: docker-compose.staging.yml efêmero no runner (sem SSH)
+  # ===========================================================================
+  deploy-staging:
+    name: Deploy Staging
+    runs-on: ubuntu-latest
+    needs: [build-and-push]
+    if: |
+      needs.build-and-push.result == 'success' &&
+      (github.event_name == 'push' || github.event.inputs.action == 'deploy') &&
+      github.event.inputs.skip_staging != 'true'
+    environment:
+      name: homolog
+      url: ${{ vars.STAGING_URL || 'http://localhost:5000' }}
+    outputs:
+      previous_image: ${{ steps.capture-previous.outputs.previous_image }}
+      deployed_image: ${{ steps.deploy-ssh.outputs.deployed_image || steps.deploy-compose.outputs.deployed_image }}
+      staging_mode: ${{ steps.detect-mode.outputs.mode }}
+      staging_base_url: ${{ steps.detect-mode.outputs.base_url }}
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Detectar modo de deploy staging
+        id: detect-mode
+        run: |
+          if [ -n "${{ secrets.STAGING_SSH_HOST }}" ]; then
+            echo "mode=ssh" >> "$GITHUB_OUTPUT"
+            echo "base_url=${{ vars.STAGING_URL }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=compose" >> "$GITHUB_OUTPUT"
+            echo "base_url=http://localhost:5000" >> "$GITHUB_OUTPUT"
+            echo "Modo compose efêmero (STAGING_SSH_HOST não configurado)"
+          fi
+
+      # --- Modo SSH: deploy no servidor remoto ---
+      - name: Configurar chave SSH (staging)
+        if: steps.detect-mode.outputs.mode == 'ssh'
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.STAGING_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.STAGING_SSH_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Capturar imagem anterior (rollback SSH)
+        id: capture-previous
+        if: steps.detect-mode.outputs.mode == 'ssh'
+        run: |
+          PREVIOUS=$(ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes \
+            "${{ secrets.STAGING_SSH_USER }}@${{ secrets.STAGING_SSH_HOST }}" \
+            "docker inspect task-manager-staging-app --format '{{.Config.Image}}' 2>/dev/null || echo ''")
+          echo "previous_image=${PREVIOUS}" >> "$GITHUB_OUTPUT"
+          echo "Imagem anterior: ${PREVIOUS:-<nenhuma>}"
+
+      - name: Deploy staging via SSH
+        id: deploy-ssh
+        if: steps.detect-mode.outputs.mode == 'ssh'
+        env:
+          IMAGE: ${{ needs.build-and-push.outputs.image }}:${{ needs.build-and-push.outputs.version }}
+          DEPLOY_PATH: ${{ vars.STAGING_DEPLOY_PATH || '/opt/task-manager' }}
+        run: |
+          echo "deployed_image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes \
+            "${{ secrets.STAGING_SSH_USER }}@${{ secrets.STAGING_SSH_HOST }}" << EOF
+            set -euo pipefail
+            cd "${DEPLOY_PATH}"
+            export DOCKER_IMAGE="${IMAGE}"
+            docker compose -f docker-compose.staging.yml pull app
+            docker compose -f docker-compose.staging.yml up -d
+            for i in \$(seq 1 30); do
+              status=\$(docker inspect task-manager-staging-app --format '{{.State.Health.Status}}' 2>/dev/null || echo "unknown")
+              if [ "\$status" = "healthy" ]; then exit 0; fi
+              sleep 5
+            done
+            docker compose -f docker-compose.staging.yml logs app --tail 50
+            exit 1
+          EOF
+
+      # --- Modo Compose: stack efêmera no runner CI ---
+      - name: Setup Docker (compose efêmero)
+        if: steps.detect-mode.outputs.mode == 'compose'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login Docker Hub (compose efêmero)
+        if: steps.detect-mode.outputs.mode == 'compose'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Deploy staging via docker-compose.staging.yml
+        id: deploy-compose
+        if: steps.detect-mode.outputs.mode == 'compose'
+        env:
+          DOCKER_IMAGE: ${{ needs.build-and-push.outputs.image }}:${{ needs.build-and-push.outputs.version }}
+          SECRET_KEY: staging-cd-${{ github.sha }}
+          REGISTRATION_ENABLED: "true"
+        run: |
+          echo "deployed_image=${DOCKER_IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "previous_image=" >> "$GITHUB_OUTPUT"
+          docker compose -f docker-compose.staging.yml up -d
+          for i in $(seq 1 36); do
+            if curl -sf http://localhost:5000/about > /dev/null; then
+              echo "Staging efêmero pronto na tentativa ${i}."
+              exit 0
+            fi
+            sleep 5
+          done
+          docker compose -f docker-compose.staging.yml logs app --tail 40
+          exit 1
+
+      - name: Registrar deployment (auditoria staging)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createDeployment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: context.sha,
+              environment: 'homolog',
+              description: `Deploy staging ${{ needs.build-and-push.outputs.version }} por @${context.actor}`,
+              auto_merge: false,
+              required_contexts: [],
+              payload: {
+                image: '${{ needs.build-and-push.outputs.image }}:${{ needs.build-and-push.outputs.version }}',
+                actor: context.actor,
+                mode: '${{ steps.detect-mode.outputs.mode }}',
+              },
+            });
+
+      - name: Resumo deploy staging
+        run: |
+          echo "### Deploy Staging" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Modo:** ${{ steps.detect-mode.outputs.mode }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Executor:** @${{ github.actor }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Imagem:** \`${{ needs.build-and-push.outputs.image }}:${{ needs.build-and-push.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # ===========================================================================
+  # Job 3: Smoke tests pós-deploy em staging
+  # ===========================================================================
+  smoke-tests:
+    name: Smoke Tests (staging)
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, build-and-push]
+    if: |
+      always() &&
+      needs.deploy-staging.result == 'success'
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Instalar jq
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq jq
+
+      - name: Aguardar warm-up
+        env:
+          BASE_URL: ${{ needs.deploy-staging.outputs.staging_base_url }}
+        run: |
+          for attempt in $(seq 1 24); do
+            if curl -sf "${BASE_URL}/about" > /dev/null; then
+              echo "Aplicação respondeu na tentativa ${attempt}."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::Timeout no warm-up de staging."
+          exit 1
+
+      - name: Smoke tests — endpoints públicos
+        env:
+          BASE_URL: ${{ needs.deploy-staging.outputs.staging_base_url }}
+        run: |
+          chmod +x scripts/smoke-test.sh
+          ./scripts/smoke-test.sh "${BASE_URL}"
+
+      - name: Smoke tests — auth + CRUD
+        env:
+          BASE_URL: ${{ needs.deploy-staging.outputs.staging_base_url }}
+        run: |
+          chmod +x scripts/smoke-test-deploy.sh
+          ./scripts/smoke-test-deploy.sh "${BASE_URL}"
+
+      - name: Encerrar staging efêmero (modo compose)
+        if: always() && needs.deploy-staging.outputs.staging_mode == 'compose'
+        run: docker compose -f docker-compose.staging.yml down -v || true
+
+      - name: Resumo smoke tests
+        if: always()
+        run: |
+          echo "### Smoke Tests" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **URL:** ${{ needs.deploy-staging.outputs.staging_base_url }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Resultado:** ${{ job.status == 'success' && '✅ Passou' || '❌ Falhou' }}" >> "$GITHUB_STEP_SUMMARY"
+
+  # ===========================================================================
+  # Job 4: Rollback automático em staging (se smoke tests falharem)
+  # ===========================================================================
+  rollback-staging-auto:
+    name: Rollback Staging (automático)
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, smoke-tests, build-and-push]
+    if: |
+      always() &&
+      needs.deploy-staging.result == 'success' &&
+      needs.smoke-tests.result == 'failure' &&
+      needs.deploy-staging.outputs.staging_mode == 'ssh' &&
+      needs.deploy-staging.outputs.previous_image != ''
+
+    steps:
+      - name: Configurar chave SSH (staging)
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.STAGING_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.STAGING_SSH_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Reverter para imagem anterior
+        env:
+          PREVIOUS_IMAGE: ${{ needs.deploy-staging.outputs.previous_image }}
+          DEPLOY_PATH: ${{ vars.STAGING_DEPLOY_PATH || '/opt/task-manager' }}
+        run: |
+          echo "::warning::Smoke tests falharam — rollback automático em staging."
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes \
+            "${{ secrets.STAGING_SSH_USER }}@${{ secrets.STAGING_SSH_HOST }}" << EOF
+            set -euo pipefail
+            cd "${DEPLOY_PATH}"
+            export DOCKER_IMAGE="${PREVIOUS_IMAGE}"
+            docker compose -f docker-compose.staging.yml pull app || true
+            docker compose -f docker-compose.staging.yml up -d
+          EOF
+          curl -sf "${{ vars.STAGING_URL }}/about" > /dev/null
+
+      - name: Notificar rollback automático (Slack — opcional)
+        if: always()
+        continue-on-error: true
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "⚠️ Rollback automático em *staging*\n• Motivo: smoke tests falharam\n• Revertido para: `${{ needs.deploy-staging.outputs.previous_image }}`\n• Commit: `${{ github.sha }}`\n• Executor: @${{ github.actor }}"
+            }
+
+      - name: Falhar pipeline após rollback
+        run: |
+          echo "::error::Deploy em staging revertido. Corrija antes de promover para produção."
+          exit 1
+
+  # ===========================================================================
+  # Job 5: Deploy em produção (aprovação manual via environment production)
+  # ===========================================================================
+  deploy-prod:
+    name: Deploy Produção
+    runs-on: ubuntu-latest
+    needs: [smoke-tests, build-and-push, deploy-staging]
+    if: |
+      always() &&
+      needs.build-and-push.result == 'success' &&
+      (
+        needs.smoke-tests.result == 'success' ||
+        needs.deploy-staging.result == 'skipped' ||
+        github.event.inputs.skip_staging == 'true'
+      ) &&
+      (github.event_name == 'push' || github.event.inputs.action == 'deploy')
+    environment:
+      name: production
+      url: ${{ vars.PROD_URL }}
+    outputs:
+      deployed_version: ${{ steps.deploy-version.outputs.version }}
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Definir versão de deploy
+        id: deploy-version
+        run: |
+          VER="${{ needs.build-and-push.outputs.version }}"
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "Deploy produção versão: ${VER}"
+
+      - name: Deploy produção via SSH (blue-green)
+        id: ssh_deploy
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.PROD_SSH_HOST }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            export DOCKER_IMAGE="${{ needs.build-and-push.outputs.image }}:${{ steps.deploy-version.outputs.version }}"
+            export SECRET_KEY="${{ secrets.PROD_JWT_SECRET }}"
+            export DATABASE_URL="${{ secrets.PROD_DATABASE_URL }}"
+            cd ${{ vars.PRODUCTION_DEPLOY_PATH || '/opt/task-manager' }}
+            chmod +x scripts/deploy-blue-green.sh
+            ./scripts/deploy-blue-green.sh "${{ steps.deploy-version.outputs.version }}"
+
+      - name: Modo registry-only (sem SSH)
+        if: steps.ssh_deploy.outcome == 'skipped' || steps.ssh_deploy.outcome == 'failure'
+        run: |
+          echo "Imagem publicada: ${{ needs.build-and-push.outputs.image }}:${{ steps.deploy-version.outputs.version }}"
+          echo "Configure PROD_SSH_HOST e PROD_SSH_KEY para deploy automático no servidor."
+
+      - name: Smoke tests em produção
+        if: vars.PROD_URL != '' && steps.ssh_deploy.outcome == 'success'
+        id: prod_smoke
+        continue-on-error: true
+        run: |
+          chmod +x scripts/smoke-test.sh scripts/smoke-test-deploy.sh
+          ./scripts/smoke-test.sh "${{ vars.PROD_URL }}"
+          ./scripts/smoke-test-deploy.sh "${{ vars.PROD_URL }}"
+
+      # Rollback automático em produção se smoke falhar após deploy
+      - name: Rollback automático em produção
+        if: steps.prod_smoke.outcome == 'failure' && secrets.PROD_SSH_HOST != ''
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.PROD_SSH_HOST }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            cd ${{ vars.PRODUCTION_DEPLOY_PATH || '/opt/task-manager' }}
+            export SECRET_KEY="${{ secrets.PROD_JWT_SECRET }}"
+            export DATABASE_URL="${{ secrets.PROD_DATABASE_URL }}"
+            ./scripts/deploy-blue-green.sh "${{ needs.build-and-push.outputs.previous_version }}" --rollback
+
+      - name: Registrar deployment (auditoria produção)
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createDeployment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: context.sha,
+              environment: 'production',
+              description: `Deploy produção ${{ steps.deploy-version.outputs.version }} — aprovado`,
+              auto_merge: false,
+              required_contexts: [],
+              payload: {
+                image: '${{ needs.build-and-push.outputs.image }}:${{ steps.deploy-version.outputs.version }}',
+                triggered_by: context.actor,
+                commit: context.sha,
+              },
+            });
+
+      - name: Notificar sucesso (Slack — opcional)
+        if: success()
+        continue-on-error: true
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "✅ Deploy em *produção* concluído\n• Imagem: `${{ needs.build-and-push.outputs.image }}:${{ steps.deploy-version.outputs.version }}`\n• Commit: `${{ github.sha }}`\n• Pipeline: @${{ github.actor }}\n• URL: ${{ vars.PROD_URL }}"
+            }
+
+      - name: Resumo deploy produção
+        if: always()
+        run: |
+          echo "### Deploy Produção" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Solicitante:** @${{ github.actor }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Aprovação:** GitHub Environment \`production\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Versão:** \`${{ steps.deploy-version.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # ===========================================================================
+  # Job 6: Deploy stack de monitoramento (Grafana / Prometheus / Loki)
+  # ===========================================================================
+  deploy-monitoring:
+    name: Deploy Monitoring
+    runs-on: ubuntu-latest
+    needs: [deploy-prod]
+    if: |
+      always() &&
+      (
+        (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'deploy-monitoring') ||
+        (
+          needs.deploy-prod.result == 'success' &&
+          (github.event_name == 'push' || github.event.inputs.action == 'deploy')
+        )
+      )
+    environment:
+      name: production
+      url: ${{ vars.GRAFANA_URL || 'http://localhost:3000' }}
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Deploy monitoramento via SSH (servidor de produção)
+        if: secrets.PROD_SSH_HOST != ''
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.PROD_SSH_HOST }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            cd ${{ vars.PRODUCTION_DEPLOY_PATH || '/opt/task-manager' }}
+            chmod +x scripts/deploy-monitoring.sh
+            GRAFANA_URL="${{ vars.GRAFANA_URL || 'http://localhost:3000' }}" \
+            PROMETHEUS_URL="${{ vars.PROMETHEUS_URL || 'http://localhost:9090' }}" \
+              ./scripts/deploy-monitoring.sh
+
+      - name: Deploy monitoramento local (sem SSH — runner CI)
+        if: secrets.PROD_SSH_HOST == ''
+        run: |
+          chmod +x scripts/deploy-monitoring.sh
+          ./scripts/deploy-monitoring.sh
+          echo "Monitoramento iniciado em http://localhost:3000"
+
+      - name: Smoke — Grafana e Prometheus
+        run: |
+          GRAFANA="${{ vars.GRAFANA_URL || 'http://localhost:3000' }}"
+          PROM="${{ vars.PROMETHEUS_URL || 'http://localhost:9090' }}"
+          curl -sf "${GRAFANA}/api/health"
+          curl -sf "${PROM}/-/healthy"
+          echo "Grafana e Prometheus respondendo."
+
+      - name: Registrar deployment (monitoramento)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createDeployment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: context.sha,
+              environment: 'monitoring',
+              description: `Deploy monitoramento por @${context.actor}`,
+              auto_merge: false,
+              required_contexts: [],
+              payload: {
+                grafana_url: '${{ vars.GRAFANA_URL || 'http://localhost:3000' }}',
+                actor: context.actor,
+              },
+            });
+
+      - name: Resumo monitoramento
+        run: |
+          echo "### Deploy Monitoramento" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Grafana:** ${{ vars.GRAFANA_URL || 'http://localhost:3000' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Prometheus:** ${{ vars.PROMETHEUS_URL || 'http://localhost:9090' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Executor:** @${{ github.actor }}" >> "$GITHUB_STEP_SUMMARY"
+
+  # ===========================================================================
+  # Job 7: Rollback manual via workflow_dispatch
+  # ===========================================================================
+  rollback-manual:
+    name: Rollback Manual
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' &&
+      (github.event.inputs.action == 'rollback-staging' || github.event.inputs.action == 'rollback-production')
+    environment:
+      name: ${{ github.event.inputs.action == 'rollback-production' && 'production' || 'homolog' }}
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Validar tag informada
+        run: |
+          if [ -z "${{ github.event.inputs.image_tag }}" ]; then
+            echo "::error::Informe image_tag para rollback manual."
+            exit 1
+          fi
+
+      - name: Rollback staging via SSH
+        if: github.event.inputs.action == 'rollback-staging'
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.STAGING_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.STAGING_SSH_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
+          IMAGE="${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.event.inputs.image_tag }}"
+          ssh -i ~/.ssh/deploy_key "${{ secrets.STAGING_SSH_USER }}@${{ secrets.STAGING_SSH_HOST }}" << EOF
+            cd ${{ vars.STAGING_DEPLOY_PATH || '/opt/task-manager' }}
+            export DOCKER_IMAGE="${IMAGE}"
+            docker compose -f docker-compose.staging.yml pull app
+            docker compose -f docker-compose.staging.yml up -d
+          EOF
+
+      - name: Rollback produção via blue-green
+        if: github.event.inputs.action == 'rollback-production'
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.PROD_SSH_HOST }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            export SECRET_KEY="${{ secrets.PROD_JWT_SECRET }}"
+            export DATABASE_URL="${{ secrets.PROD_DATABASE_URL }}"
+            cd ${{ vars.PRODUCTION_DEPLOY_PATH || '/opt/task-manager' }}
+            ./scripts/deploy-blue-green.sh "${{ github.event.inputs.image_tag }}" --rollback
+
+      - name: Validar health pós-rollback
+        run: |
+          URL="${{ github.event.inputs.action == 'rollback-production' && vars.PROD_URL || vars.STAGING_URL }}"
+          if [ -n "$URL" ]; then
+            chmod +x scripts/smoke-test.sh
+            ./scripts/smoke-test.sh "$URL"
+          fi
+
+      - name: Registrar rollback (auditoria)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const env = '${{ github.event.inputs.action }}' === 'rollback-production' ? 'production' : 'homolog';
+            await github.rest.repos.createDeployment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: context.sha,
+              environment: env,
+              description: `Rollback manual → ${{ github.event.inputs.image_tag }} por @${context.actor}`,
+              auto_merge: false,
+              required_contexts: [],
+              payload: {
+                action: 'rollback-manual',
+                image_tag: '${{ github.event.inputs.image_tag }}',
+                reason: '${{ github.event.inputs.rollback_reason }}',
+                actor: context.actor,
+              },
+            });
+
+      - name: Notificar rollback manual (Slack — opcional)
+        if: always()
+        continue-on-error: true
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "🔄 Rollback manual\n• Ambiente: ${{ github.event.inputs.action }}\n• Tag: `${{ github.event.inputs.image_tag }}`\n• Motivo: ${{ github.event.inputs.rollback_reason || 'não informado' }}\n• Executor: @${{ github.actor }}"
+            }
+
+  # ===========================================================================
+  # Job 8: Notificações finais e resumo do pipeline
+  # ===========================================================================
+  notify:
+    name: Notificações
+    runs-on: ubuntu-latest
+    needs: [validate-gates, build-and-push, deploy-staging, smoke-tests, deploy-prod, deploy-monitoring]
+    if: always()
+
+    steps:
+      - name: Slack — falha no pipeline
+        if: |
+          needs.validate-gates.result == 'failure' ||
+          needs.build-and-push.result == 'failure' ||
+          needs.smoke-tests.result == 'failure' ||
+          needs.deploy-prod.result == 'failure'
+        continue-on-error: true
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "❌ Deploy Pipeline falhou\n• Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\n• Commit: `${{ github.sha }}`\n• Autor: @${{ github.actor }}"
+            }
+
+      - name: Resumo final do pipeline
+        run: |
+          echo "### Resumo Deploy Pipeline" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Job | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| validate-gates | ${{ needs.validate-gates.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| build-and-push | ${{ needs.build-and-push.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| deploy-staging | ${{ needs.deploy-staging.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| smoke-tests | ${{ needs.smoke-tests.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| deploy-prod | ${{ needs.deploy-prod.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| deploy-monitoring | ${{ needs.deploy-monitoring.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Auditoria:** quem disparou o pipeline → @${{ github.actor }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Aprovação produção:** via Environment \`production\` (reviewers no GitHub)" >> "$GITHUB_STEP_SUMMARY"

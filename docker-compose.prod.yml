@@ -1,0 +1,84 @@
+# =============================================================================
+# Docker Compose — Produção blue-green (Task Manager DevSecOps)
+# =============================================================================
+# Dois slots de app; apenas um recebe tráfego via nginx/proxy.
+# Portas internas: blue=5001, green=5002 — proxy público em :5000 ou :443
+#
+# Uso:
+#   export DOCKER_IMAGE=usuario/task-manager:v1.3.0
+#   COMPOSE_PROFILES=blue docker compose -f docker-compose.prod.yml up -d app-blue
+# =============================================================================
+
+services:
+
+  app-blue:
+    profiles: [blue]
+    image: ${DOCKER_IMAGE:-task-manager:latest}
+    container_name: task-manager-prod-blue
+    ports:
+      - "5001:5000"
+    environment: &app_env
+      FLASK_APP: todo_project
+      FLASK_ENV: production
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY required}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL required}
+      SYSLOG_ENABLED: ${SYSLOG_ENABLED:-true}
+      REGISTRATION_ENABLED: ${REGISTRATION_ENABLED:-false}
+      JWT_COOKIE_SECURE: "true"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/about', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - prod-network
+
+  app-green:
+    profiles: [green]
+    image: ${DOCKER_IMAGE:-task-manager:latest}
+    container_name: task-manager-prod-green
+    ports:
+      - "5002:5000"
+    environment: *app_env
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/about', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - prod-network
+
+  db:
+    image: postgres:15-alpine
+    container_name: task-manager-prod-db
+    environment:
+      POSTGRES_USER: ${DB_USER:-taskmanager}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD required}
+      POSTGRES_DB: ${DB_NAME:-taskmanager}
+    volumes:
+      - postgres_prod_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-taskmanager}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - prod-network
+
+networks:
+  prod-network:
+    driver: bridge
+
+volumes:
+  postgres_prod_data:
