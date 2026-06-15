@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [master, homolog, develop]
+  push:
+    branches: [develop, homolog, master]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t task-manager-flask .
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Placeholder — lint será expandido
+        run: echo "Lint (ruff/flake8) será implementado nas próximas iterações."
+
+  security:
+    name: Security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Placeholder — security scan será expandido
+        run: echo "Security scan (Trivy, Bandit, etc.) será implementado nas próximas iterações."
