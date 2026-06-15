@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Valida mensagens de commit no padrão Conventional Commits.
+# Ative com: git config core.hooksPath .githooks
+
+set -euo pipefail
+
+commit_msg_file="$1"
+commit_msg="$(sed '/^#/d' "$commit_msg_file" | tr -d '\r')"
+
+# Permite merge/revert automáticos do Git/GitHub
+if echo "$commit_msg" | grep -qE '^(Merge|Revert) '; then
+  exit 0
+fi
+
+pattern='^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([a-z0-9._-]+\))?!?: .{1,72}$'
+
+if ! echo "$commit_msg" | grep -qE "$pattern"; then
+  cat <<'EOF' >&2
+❌ Mensagem de commit fora do padrão Conventional Commits.
+
+Formato esperado:
+  <tipo>(<escopo opcional>): <descrição>
+
+Tipos válidos:
+  build | chore | ci | docs | feat | fix | perf | refactor | revert | style | test
+
+Exemplos:
+  feat(docker): adicionar Dockerfile multi-stage
+  fix(auth): corrigir validação de senha
+  ci(github): configurar pipeline de build
+
+Documentação: CONTRIBUTING.md
+EOF
+  exit 1
+fi
+
+exit 0
