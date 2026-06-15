@@ -36,3 +36,23 @@ jobs:
 
       - name: Placeholder — security scan será expandido
         run: echo "Security scan (Trivy, Bandit, etc.) será implementado nas próximas iterações."
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pytest
+        env:
+          SYSLOG_ENABLED: "false"
+          BOOTSTRAP_ADMIN_ENABLED: "false"
+        run: pytest test_app.py -v
