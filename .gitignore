@@ -13,6 +13,7 @@ ENV/
 
 # Variáveis de ambiente e segredos
 .env
+.env.staging
 .env.local
 .env.*.local
 
@@ -56,4 +57,12 @@ todo_project/todo_project/site.db
 
 # Docker / CI (artefatos locais)
 bandit-report.json
+bandit-report-before.json
+bandit-report-after.json
+dependency-check-report.json
+dependency-check-report-before.json
+dependency-check-report-after.json
+safety-report.json
 zap-report.html
+reports/
+reports/dast/.jwt-token

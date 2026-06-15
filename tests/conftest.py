@@ -9,6 +9,12 @@ from pathlib import Path
 import pytest
 import werkzeug
 
+def pytest_configure(config):
+    config.addinivalue_line(
+        'markers',
+        'smoke: testes rápidos pós-deploy (funcionalidades críticas)',
+    )
+
 if not hasattr(werkzeug, '__version__'):
     werkzeug.__version__ = '3.0.0'
 

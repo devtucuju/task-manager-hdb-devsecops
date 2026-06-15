@@ -1,0 +1,161 @@
+# =============================================================================
+# Docker Compose — Staging (Task Manager DevSecOps)
+# =============================================================================
+# Diferenças em relação ao docker-compose.yml (desenvolvimento):
+#   - Imagem pré-construída do registry (sem build local / bind mount)
+#   - FLASK_ENV=staging e variáveis de homologação
+#   - Limites de CPU/memória em todos os serviços
+#   - Health checks mais rigorosos (intervalos menores, mais retries)
+#
+# Uso:
+#   cp .env.staging.example .env.staging
+#   docker compose -f docker-compose.staging.yml --env-file .env.staging up -d
+#   docker compose -f docker-compose.staging.yml ps
+#   docker compose -f docker-compose.staging.yml down
+#
+# Para trocar a imagem:
+#   export DOCKER_IMAGE=docker.io/seu-usuario/task-manager:latest
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Aplicação Flask (imagem do registry)
+  # ---------------------------------------------------------------------------
+  app:
+    image: ${DOCKER_IMAGE:-docker.io/seu-usuario/task-manager:latest}
+    container_name: task-manager-staging-app
+    env_file:
+      - path: .env.staging
+        required: false
+    ports:
+      - "5000:5000"
+    environment:
+      FLASK_APP: todo_project
+      FLASK_ENV: staging
+      SECRET_KEY: ${SECRET_KEY:-staging-secret-change-me}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-taskmanager}:${POSTGRES_PASSWORD:-senha123}@db:5432/${POSTGRES_DB:-taskmanager}
+      SQLALCHEMY_DATABASE_URI: postgresql://${POSTGRES_USER:-taskmanager}:${POSTGRES_PASSWORD:-senha123}@db:5432/${POSTGRES_DB:-taskmanager}
+      SYSLOG_ENABLED: ${SYSLOG_ENABLED:-true}
+      SYSLOG_HOST: syslog
+      SYSLOG_PORT: "514"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      REGISTRATION_ENABLED: ${REGISTRATION_ENABLED:-true}
+      BOOTSTRAP_ADMIN_ENABLED: ${BOOTSTRAP_ADMIN_ENABLED:-false}
+      BOOTSTRAP_ADMIN_ALLOW_PRODUCTION: "false"
+      JWT_COOKIE_SECURE: ${JWT_COOKIE_SECURE:-false}
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    depends_on:
+      db:
+        condition: service_healthy
+      syslog:
+        condition: service_started
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; r = urllib.request.urlopen('http://127.0.0.1:5000/about', timeout=3); exit(0 if r.status == 200 else 1)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - staging-network
+    deploy:
+      resources:
+        limits:
+          memory: 384m
+          cpus: "0.75"
+        reservations:
+          memory: 128m
+          cpus: "0.25"
+
+  # ---------------------------------------------------------------------------
+  # Banco de dados PostgreSQL
+  # ---------------------------------------------------------------------------
+  db:
+    image: postgres:15-alpine
+    container_name: task-manager-staging-db
+    env_file:
+      - path: .env.staging
+        required: false
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-taskmanager}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-senha123}
+      POSTGRES_DB: ${POSTGRES_DB:-taskmanager}
+    volumes:
+      - postgres_data_staging:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-taskmanager} -d ${POSTGRES_DB:-taskmanager} -h 127.0.0.1",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    restart: unless-stopped
+    networks:
+      - staging-network
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.50"
+        reservations:
+          memory: 64m
+          cpus: "0.10"
+
+  # ---------------------------------------------------------------------------
+  # Coletor de logs (rsyslog)
+  # ---------------------------------------------------------------------------
+  syslog:
+    image: rsyslog:latest
+    container_name: task-manager-staging-syslog
+    ports:
+      - "514:514/udp"
+    volumes:
+      - ./config/rsyslog/remote.conf:/etc/rsyslog.d/remote.conf:ro
+      - logs_staging:/var/log
+    healthcheck:
+      test: ["CMD-SHELL", "pidof rsyslogd > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - staging-network
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+          cpus: "0.25"
+        reservations:
+          memory: 32m
+          cpus: "0.05"
+
+# =============================================================================
+# Redes
+# =============================================================================
+networks:
+  staging-network:
+    driver: bridge
+    name: staging-network
+
+# =============================================================================
+# Volumes nomeados (persistência)
+# =============================================================================
+volumes:
+  postgres_data_staging:
+    name: postgres_data_staging
+  logs_staging:
+    name: logs_staging
