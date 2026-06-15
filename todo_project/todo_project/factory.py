@@ -45,6 +45,13 @@ def create_app(config_class=Config) -> Flask:
         from todo_project.auth import load_current_user
         g.current_user = load_current_user()
 
+    @app.after_request
+    def set_security_headers(response):
+        response.headers.setdefault('X-Frame-Options', 'DENY')
+        response.headers.setdefault('X-Content-Type-Options', 'nosniff')
+        response.headers.setdefault('Referrer-Policy', 'strict-origin-when-cross-origin')
+        return response
+
     from todo_project.routes import register_routes
     register_routes(app)
 
