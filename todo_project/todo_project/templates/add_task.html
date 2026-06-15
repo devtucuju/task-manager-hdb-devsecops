@@ -7,25 +7,40 @@
         <fieldset class="form-group">
             <legend class="border-bottom mb-4">{{ title }}</legend>
 
-            <!-- Add Task Field -->
             <div class="form-group">
-                {{ form.task_name.label(class="form-control-label") }}
-                {% if form.task_name.errors %}
-                {{ form.task_name(class="form-control is-invalid") }}
-                <div class="invalid-feedback">
-                    {% for error in form.task_name.errors %}
-                    <span>{{ error }}</span>
-                    {% endfor %}
+                {{ form.title.label(class="form-control-label") }}
+                {{ form.title(class="form-control" + (" is-invalid" if form.title.errors else "")) }}
+                {% for e in form.title.errors %}<div class="invalid-feedback d-block">{{ e }}</div>{% endfor %}
+            </div>
+
+            <div class="form-group">
+                {{ form.description.label(class="form-control-label") }}
+                {{ form.description(class="form-control", rows=3) }}
+            </div>
+
+            <div class="form-row">
+                <div class="form-group col-md-4">
+                    {{ form.priority.label(class="form-control-label") }}
+                    {{ form.priority(class="form-control") }}
                 </div>
-                {% else %}
-                {{ form.task_name(class="form-control") }}
-                {% endif %}
+                <div class="form-group col-md-4">
+                    {{ form.status.label(class="form-control-label") }}
+                    {{ form.status(class="form-control") }}
+                </div>
+                <div class="form-group col-md-4">
+                    {{ form.category.label(class="form-control-label") }}
+                    {{ form.category(class="form-control") }}
+                </div>
             </div>
 
             <div class="form-group">
-                {{ form.submit(class="btn btn-success") }}
+                {{ form.due_date.label(class="form-control-label") }}
+                {{ form.due_date(class="form-control") }}
             </div>
 
+            <div class="form-group">
+                {{ form.submit(class="btn btn-primary") }}
+            </div>
         </fieldset>
     </form>
 </div>
