@@ -1,22 +1,22 @@
 # =============================================================================
-# Docker Compose — Task Manager Flask (DevSecOps)
-# Repositório: https://github.com/devtucuju/task-manager-hdb-devsecops
+# Docker Compose — Stack completo Task Manager DevSecOps
+# =============================================================================
+# Serviços: app, db, syslog + monitoramento (include)
 #
 # Uso:
 #   cp .env.example .env
 #   docker compose up -d --build
-#   docker compose down
-#   docker compose logs -f app
 #
-# Se alterar DB_PASSWORD/DB_NAME, recrie o volume PostgreSQL:
-#   docker compose down -v && docker compose up -d --build
+# Apenas monitoramento:
+#   ./scripts/deploy-monitoring.sh
+#   # ou: docker compose -f docker-compose.monitoring.yml up -d
 # =============================================================================
+
+include:
+  - path: docker-compose.monitoring.yml
 
 services:
 
-  # ---------------------------------------------------------------------------
-  # Aplicação Flask (Gunicorn)
-  # ---------------------------------------------------------------------------
   app:
     build:
       context: .
@@ -28,14 +28,25 @@ services:
     ports:
       - "5000:5000"
     environment:
-      # Módulo real deste repositório (objeto app em todo_project/__init__.py)
       FLASK_APP: todo_project
+      FLASK_ENV: ${FLASK_ENV:-production}
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
     volumes:
-      # Bind mount para hot-reload / desenvolvimento local
       - ./:/app
     depends_on:
       db:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/about', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     restart: unless-stopped
     networks:
       - app-network
@@ -46,9 +57,6 @@ services:
           cpus: "1"
     working_dir: /app/todo_project
 
-  # ---------------------------------------------------------------------------
-  # Banco de dados PostgreSQL
-  # ---------------------------------------------------------------------------
   db:
     image: postgres:15-alpine
     container_name: task-manager-db
@@ -69,39 +77,32 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     restart: unless-stopped
     networks:
       - app-network
 
-  # ---------------------------------------------------------------------------
-  # Coletor de logs (rsyslog)
-  # Imagem oficial: https://hub.docker.com/r/rsyslog/rsyslog
-  # ---------------------------------------------------------------------------
   syslog:
     image: rsyslog/rsyslog:latest
     container_name: task-manager-syslog
     ports:
       - "514:514/udp"
     volumes:
-      # Configuração para escutar UDP 514 e gravar em /var/log/remote.log
       - ./config/rsyslog/remote.conf:/etc/rsyslog.d/remote.conf:ro
-      # Logs persistidos no host (diretório ./logs na raiz do projeto)
       - ./logs:/var/log
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     restart: unless-stopped
     networks:
       - app-network
 
-# =============================================================================
-# Redes
-# =============================================================================
-networks:
-  app-network:
-    driver: bridge
-    name: app-network
-
-# =============================================================================
-# Volumes nomeados (persistência)
-# =============================================================================
 volumes:
   postgres_data:
     name: postgres_data

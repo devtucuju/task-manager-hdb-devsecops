@@ -1,0 +1,46 @@
+# Git
+.git
+.gitignore
+.github
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.egg-info
+.eggs
+dist
+build
+.pytest_cache
+.mypy_cache
+.coverage
+htmlcov
+.tox
+.nox
+
+# Ambientes e segredos
+.env
+.venv
+venv
+env
+
+# Logs e dados locais
+logs
+*.log
+todo_project/todo_project/site.db
+postgres_data
+
+# Testes e documentação (não necessários na imagem de produção)
+tests
+test_app.py
+CONTRIBUTING.md
+output
+
+# IDE
+.idea
+.vscode
+*.swp
+
+# CI artifacts
+bandit-report.json
+zap-report.html

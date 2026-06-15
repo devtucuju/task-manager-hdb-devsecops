@@ -57,6 +57,9 @@ class Config:
     # Rate limiting — login
     LOGIN_RATE_LIMIT = os.environ.get('LOGIN_RATE_LIMIT', '5 per 15 minutes')
 
+    # Prometheus
+    METRICS_ENABLED = _env_bool('METRICS_ENABLED', True)
+
     @staticmethod
     def validate():
         if not Config.SECRET_KEY or Config.SECRET_KEY == 'sua-chave-secreta-aqui':
