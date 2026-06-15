@@ -3,7 +3,7 @@
 # =============================================================================
 # Task Manager DevSecOps
 #
-# Fluxo (push em main):
+# Fluxo (push em main ou master):
 #   1. validate-gates   → aguarda CI, SAST e DAST verdes no mesmo commit
 #   2. build-and-push   → build multi-plataforma (Buildx) + push Docker Hub
 #   3. deploy-staging   → deploy em homolog/staging
@@ -44,10 +44,11 @@
 name: Deploy Pipeline
 
 on:
-  # Deploy contínuo exclusivamente em push na branch main
+  # Deploy contínuo em push na branch principal (main ou master)
   push:
     branches:
       - main
+      - master
 
   # Rollback manual e re-deploy sob demanda
   workflow_dispatch:
