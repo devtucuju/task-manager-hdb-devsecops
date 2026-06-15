@@ -18,16 +18,14 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: task-manager-app
+    env_file:
+      - path: .env
+        required: false
     ports:
       - "5000:5000"
     environment:
+      # Módulo real deste repositório (objeto app em todo_project/__init__.py)
       FLASK_APP: todo_project
-      FLASK_ENV: production
-      PYTHONUNBUFFERED: "1"
-      PYTHONDONTWRITEBYTECODE: "1"
-      # URI do PostgreSQL (requer psycopg2 e leitura via env na app)
-      SQLALCHEMY_DATABASE_URI: postgresql://${POSTGRES_USER:-taskmanager}:${POSTGRES_PASSWORD:-taskmanager_secret}@db:5432/${POSTGRES_DB:-taskmanager_db}
-      SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
     volumes:
       # Bind mount para hot-reload / desenvolvimento local
       - ./:/app
@@ -50,16 +48,19 @@ services:
   db:
     image: postgres:15-alpine
     container_name: task-manager-db
+    env_file:
+      - path: .env
+        required: false
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-taskmanager}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-taskmanager_secret}
-      POSTGRES_DB: ${POSTGRES_DB:-taskmanager_db}
+      POSTGRES_USER: ${DB_USER:-taskmanager}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-senha123}
+      POSTGRES_DB: ${DB_NAME:-taskmanager}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-taskmanager} -d ${POSTGRES_DB:-taskmanager_db}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-taskmanager} -d ${DB_NAME:-taskmanager}"]
       interval: 10s
       timeout: 5s
       retries: 5
