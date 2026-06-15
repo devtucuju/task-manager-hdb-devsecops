@@ -70,13 +70,16 @@ services:
 
   # ---------------------------------------------------------------------------
   # Coletor de logs (rsyslog)
+  # Imagem oficial: https://hub.docker.com/r/rsyslog/rsyslog
   # ---------------------------------------------------------------------------
   syslog:
-    image: rsyslog:latest
+    image: rsyslog/rsyslog:latest
     container_name: task-manager-syslog
     ports:
       - "514:514/udp"
     volumes:
+      # Configuração para escutar UDP 514 e gravar em /var/log/remote.log
+      - ./config/rsyslog/remote.conf:/etc/rsyslog.d/remote.conf:ro
       # Logs persistidos no host (diretório ./logs na raiz do projeto)
       - ./logs:/var/log
     restart: unless-stopped
