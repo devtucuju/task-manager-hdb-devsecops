@@ -34,11 +34,11 @@
 
           <!-- Navbar Right Side -->
           <div class="navbar-nav">
-            {% if current_user.is_authenticated %}
+            {% if current_user %}
             <li class="nav-item dropdown">
               <a class="nav-link dropdown-toggle" href="#" id="navbarDropdown" role="button" data-toggle="dropdown"
                 aria-haspopup="true" aria-expanded="false">
-                Welcome {{ current_user.username }}!
+                Welcome {{ current_user.username | e }}!
               </a>
               <div class="dropdown-menu" aria-labelledby="navbarDropdown">
                 <a class="dropdown-item" href="{{ url_for('account') }}">Account Settings</a>
@@ -62,17 +62,19 @@
   <main role="main" class="container">
     <div class="row">
 
-      <!-- For Labels -->
+      {% if current_user %}
       <div class="col-md-4">
         <div class="content-section">
           <nav class="nav flex-column">
-            <a class="nav-link" href="{{url_for('add_task')}}">Add Task</a>
-            <a class="nav-link active" href="{{url_for('all_tasks')}}">View All Tasks</a>
+            <a class="nav-link" href="{{ url_for('add_task') }}">Add Task</a>
+            <a class="nav-link active" href="{{ url_for('all_tasks') }}">View All Tasks</a>
           </nav>
         </div>
       </div>
-
       <div class="col-md-8">
+      {% else %}
+      <div class="col-md-12">
+      {% endif %}
         {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
         {% for category, message in messages %}
