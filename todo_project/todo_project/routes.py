@@ -61,6 +61,10 @@ def logout():
 
 @app.route("/register", methods=['POST', 'GET'])
 def register():
+    if not app.config.get('REGISTRATION_ENABLED', False):
+        flash('Registration is disabled.', 'warning')
+        return redirect(url_for('login'))
+
     if current_user.is_authenticated:
         return redirect(url_for('all_tasks'))
 
