@@ -88,7 +88,11 @@ def token_required(f):
     def decorated(*args, **kwargs):
         user = load_current_user()
         if not user:
-            if request.path.startswith('/api/') or request.is_json:
+            if (
+                request.path.startswith('/api/')
+                or request.path.startswith('/tasks')
+                or request.is_json
+            ):
                 return jsonify({'error': 'Autenticação necessária'}), 401
             flash('Faça login para continuar.', 'warning')
             return redirect(url_for('login', next=request.path))

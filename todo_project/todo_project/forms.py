@@ -1,5 +1,4 @@
 """Formulários WTForms com CSRF e validação de senha forte."""
-import re
 
 from flask_wtf import FlaskForm
 from wtforms import (

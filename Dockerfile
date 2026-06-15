@@ -32,9 +32,6 @@ RUN pip install --no-cache-dir --upgrade pip \
 # 7. Copiar o restante do código-fonte
 COPY . .
 
-# Symlink para pytest no WORKDIR /app/todo_project (test_app.py fica na raiz do repo)
-RUN ln -sf /app/test_app.py /app/todo_project/test_app.py
-
 # 8. Garantir permissões para o usuário não-root (SQLite grava site.db em runtime)
 RUN chown -R appuser:appuser /app
 
