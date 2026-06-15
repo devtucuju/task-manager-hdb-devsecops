@@ -3,9 +3,13 @@
 # Repositório: https://github.com/devtucuju/task-manager-hdb-devsecops
 #
 # Uso:
+#   cp .env.example .env
 #   docker compose up -d --build
 #   docker compose down
 #   docker compose logs -f app
+#
+# Se alterar DB_PASSWORD/DB_NAME, recrie o volume PostgreSQL:
+#   docker compose down -v && docker compose up -d --build
 # =============================================================================
 
 services:

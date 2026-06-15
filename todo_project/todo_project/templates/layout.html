@@ -49,7 +49,9 @@
 
             {% else %}
             <a class="nav-item nav-link" href="{{ url_for('login') }}">Login</a>
+            {% if config.REGISTRATION_ENABLED %}
             <a class="nav-item nav-link" href="{{ url_for('register') }}">Register</a>
+            {% endif %}
             {% endif %}
 
           </div>

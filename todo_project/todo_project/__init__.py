@@ -24,6 +24,11 @@ app.config['APP_VERSION'] = os.environ.get('APP_VERSION', '1.0.0')
 app.config['LOG_LEVEL'] = os.environ.get('LOG_LEVEL', 'INFO')
 app.config['SYSLOG_HOST'] = os.environ.get('SYSLOG_HOST', 'syslog')
 app.config['SYSLOG_PORT'] = int(os.environ.get('SYSLOG_PORT', '514'))
+app.config['FLASK_ENV'] = os.environ.get('FLASK_ENV', 'production')
+app.config['REGISTRATION_ENABLED'] = _env_bool(
+    'REGISTRATION_ENABLED',
+    app.config['FLASK_ENV'] != 'production',
+)
 db = SQLAlchemy(app)
 
 login_manager = LoginManager(app)
@@ -37,3 +42,5 @@ from todo_project import routes
 
 with app.app_context():
     db.create_all()
+    from todo_project.bootstrap import bootstrap_admin
+    bootstrap_admin()
